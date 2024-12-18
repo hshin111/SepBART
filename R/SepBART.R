@@ -10,27 +10,21 @@
 ##### W: q dimensional exposure matrix
 ##### Xtest: Testing locations (not be used in data analysis)
 ##### W1, W0: Two exposure levels under which we want to compare the outcomes
+##### W0_VIM: Exposure levels under which MTE-VIMs are calculated
 ##### n_blocks: The number of blocks which we want to decompose an n by n large matrix into.
 ##### nMCMC: The total number of MCMC iterations
 ##### BurnIn_portion: The proportion of iterations to be discarded
 ##### stepsize: The step size after the burn-in period.
-##### Other arguments control the tree parameters (not be used in data analysis)
 ###################################################################
 
-SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile = NULL,
+SepBART <- function(Y,X,W, Xtest = NULL,
+                        W1_quantile = 0.75,
+                        W0_quantile = 0.25,
+                        W0_quantile_VIM = c(0.25,0.5,0.75),
                         n_blocks = NULL,
                         Mod_ind = NULL,
                         Group_ind = NULL,
                         nMCMC=2000,BurnIn_portion=0.2,stepsize=5){
-  # Xtest = NULL; W1 = NULL; W0 = NULL; W0_quantile = NULL;
-  # n_blocks = NULL;
-  # Mod_ind = NULL;
-  # Group_ind = NULL;
-  # nMCMC=20; BurnIn_portion=0.1;stepsize=1
-  require("SoftBart")
-  require("ModBart")
-  require("mvtnorm")
-  require("LaplacesDemon")
   start.time.MCMC <- Sys.time()
 
   num_obs <- length(Y) ## Sample size
@@ -39,6 +33,7 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
   BurnIn <- nMCMC*BurnIn_portion ## The number of MCMC iterations to be discarded.
   save_index <- seq(BurnIn+1,nMCMC,stepsize) ## A sequence of iteration indices to be stored.
   nsave <- length(save_index)
+  v <- length(W0_quantile_VIM)
 
   ## If n_blocks is not given,
   ## find the total number of blocks necessary to partition into 100 by 100 sub-matrices.
@@ -82,14 +77,15 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
   }
 
   ## default W1 and W0
-  if (is.null(W1)) W1 = apply(W, 2, quantile, 0.75, na.rm = TRUE)
-  if (is.null(W0) & is.null(W0_quantile)){
-    W0 = apply(W, 2, quantile, 0.25, na.rm = TRUE)
-  }else if (is.null(W0) & !is.null(W0_quantile)){
-    W0 = apply(W, 2, quantile, W0_quantile, na.rm = TRUE)
-  }
-  print(paste("W0:",W0))
-  print(paste("W1:",W1))
+  W1 = apply(W, 2, quantile, W1_quantile, na.rm = TRUE)
+  W0 = apply(W, 2, quantile, W0_quantile, na.rm = TRUE)
+  print(cat("W0:",W0))
+  print(cat("W1:",W1))
+
+
+  W0_VIM = apply(W, 2, quantile, W0_quantile_VIM, na.rm = TRUE)
+  cat("W0_VIM:")
+  print(W0_VIM)
 
   ## Calculate propensity and choose the upper half
   temp <- data.frame(W=W, X=X)
@@ -107,22 +103,18 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
   ps_min <- pmin(ps1,ps0)
   upper_half <- ps_min > median(ps_min)
 
-  ## Normalize the covariates and exposures.
   if (is.null(Xtest)==FALSE){
     norm_X_Xtest <- quantile_normalize_bart(rbind(X,Xtest))
-    norm_W_W0W1 <- quantile_normalize_bart(rbind(W,W0,W1))
     X <- norm_X_Xtest[1:num_obs,]
     Xtest <- norm_X_Xtest[-(1:num_obs),]
-    W <- norm_W_W0W1[1:num_obs,]
-    W0 <- norm_W_W0W1[num_obs+1,]
-    W1 <- norm_W_W0W1[num_obs+2,]
   }else{
     norm_X <- quantile_normalize_bart(X)
-    norm_W_W0W1 <- quantile_normalize_bart(rbind(W,W0,W1))
     X <- norm_X[1:num_obs,]
-    W <- norm_W_W0W1[1:num_obs,]
-    W0 <- norm_W_W0W1[num_obs+1,]
-    W1 <- norm_W_W0W1[num_obs+2,]
+    norm_W <- quantile_normalize_bart(W)
+    W <- norm_W
+    W1 = apply(norm_W, 2, quantile, W1_quantile, na.rm = TRUE)
+    W0 = apply(norm_W, 2, quantile, W0_quantile, na.rm = TRUE)
+    W0_VIM = apply(norm_W, 2, quantile, W0_quantile_VIM, na.rm = TRUE)
   }
 
   ## W quantiles after normalizing. This will be used to calculate E(Y(W)-Y(W0))
@@ -170,10 +162,9 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
   W_sampled <- list()
   X_sampled_grid <- list()
   W_sampled_grid <- list()
-  W0_grid <- list()
   W_star_sampled <- list()
   X_star_sampled <- list()
-  W0_sampled <- list()
+  W0_sampled <- W0_grid <- list()
   for (block in 1:n_blocks){
     sample_index <- which(block_index==block)
     N <- sum(block_index==block)
@@ -181,12 +172,14 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
     W_sampled[[block]] <- W[sample_index,]
     X_sampled_grid[[block]] <- X_sampled[[block]][rep(1:N,N),]
     W_sampled_grid[[block]] <- W_sampled[[block]][rep(1:N,each=N),]
-    W0_grid[[block]] <- t(W0)[rep(1,N^2),]
     W_star_sampled[[block]] <- t(W_star)[rep(1, N),]
     X_star_sampled[[block]] <- t(X_star)[rep(1, N),]
-    W0_sampled[[block]] <- t(W0)[rep(1, N),]
+    W0_grid[[block]] <- W0_sampled[[block]] <- vector("list",v)
+    for (vv in 1:v){
+      W0_grid[[block]][[vv]] <- t(W0_VIM[vv,])[rep(1,N^2),]
+      W0_sampled[[block]][[vv]] <- t(W0_VIM[vv,])[rep(1, N),]
+    }
   }
-
 
 
   ## Set the starting values
@@ -207,19 +200,19 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
     CATE_test_hat <- E_Y_W0_test <- E_Y_W1_test <- matrix(NA, nrow=nsave, ncol=dim(Xtest)[1])
   }else{CATE_test_hat <- E_Y_W0_test <- E_Y_W1_test <- NA}
   CATE_hat <- E_Y_W1 <- E_Y_W0 <- matrix(NA, nrow=nsave, ncol=num_obs)
-  Hetero_total <- rep(NA, nsave)
+  Hetero_total <- matrix(NA, nsave, v)
   Hetero_wo <- Hetero_wo_group <- list()
   psi_hat <- psi_hat_group <- list()
   CATE_h_hat <- list()
   for (j in Mod_ind){
     CATE_h_hat[[j]] <- matrix(NA, nrow=nsave, ncol=num_obs)
-    Hetero_wo[[j]] <- rep(NA, nsave)
-    psi_hat[[j]] <- rep(NA, nsave)
+    Hetero_wo[[j]] <- matrix(NA, nsave, v)
+    psi_hat[[j]] <- matrix(NA, nsave, v)
   }
   if (!is.null(Group_ind)){
     for (gg in 1:length(Group_ind)){
-      Hetero_wo_group[[gg]] <- rep(NA, nsave)
-      psi_hat_group[[gg]] <- rep(NA, nsave)
+      Hetero_wo_group[[gg]] <- matrix(NA, nsave, v)
+      psi_hat_group[[gg]] <- matrix(NA, nsave, v)
     }
   }
 
@@ -258,10 +251,6 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
       }
     }
   }
-  check_list = list()
-  check_list$W_count = c()
-  check_list$X_count = c()
-  check_list$inter_count = c()
   ## Start MCMC
   ## We use the Bayesian backfitting method.
   for (k in 2:nMCMC){
@@ -298,9 +287,6 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
     mu_hat_X_new <- t(forest_X$do_gibbs(X,R,X,1)) ## Update f(X)
     mu_hat_X_x0 <- forest_X$do_predict(matrix(X_star,nrow=1)) ## Calculate f(X*)
 
-    check_list$W_count = forest_W$get_counts()
-    check_list$X_count = forest_X$get_counts()
-
     ## Update h(X,W) = sum{h_j(X_j,W)}
     if (k==2) {
       opts_mod <- ModBart::Opts(num_burn = 0, num_save = 1, num_thin = 1, update_sigma = FALSE)
@@ -323,6 +309,7 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
     mu_hat_intact_grid_00 <- list()
 
     temp_count = c()
+    temp_sigma_mu = c()
     for (j in rd_order){
       R_int_a <- R_int_a - mu_hat_intact_prev[[j]]
       R <- Y - mu_hat_c_new - mu_hat_X_new - mu_hat_W_new - R_int_a - R_int_b
@@ -333,10 +320,7 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
       mu_hat_intact_grid_w0[[j]] <- forest[[j]]$predict(obs_grid_w0[,1:q],obs_grid_w0[,q+j]) ## Calculate h_j(X_j, W*)
       mu_hat_intact_grid_00[[j]] <- forest[[j]]$predict(obs_grid_00[,1:q],obs_grid_00[,q+j]) ## Calculate h_j(X*_j, W*)
       temp_count = cbind(temp_count, forest[[j]]$get_counts())
-    }
-    check_list$inter_count = temp_count
-    if(k %%100==0){
-      print(check_list)
+      temp_sigma_mu = cbind(temp_sigma_mu,forest[[j]]$get_params()$sigma_mu)
     }
 
 
@@ -367,7 +351,7 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
         rep(forest_W$do_predict(t(W0)),num_obs) + h_W0
 
       CATE_hat[k_index,] <- E_Y_W1[k_index,] - E_Y_W0[k_index,]
-      cat("ATE = ", mean(CATE_hat[k_index,])* sd_Y, "E_Y_W0=", mean(E_Y_W0[k_index,])* sd_Y, "E_Y_W1=", mean(E_Y_W1[k_index,])* sd_Y, "\r")
+      cat("ATE = ", mean(CATE_hat[k_index,])* sd_Y, "E_Y_W0=", mean(E_Y_W0[k_index,])* sd_Y, "E_Y_W1=", mean(E_Y_W1[k_index,])* sd_Y, "\n")
 
       if (is.null(Xtest)==FALSE){
         CATE_test_hat_int <- 0
@@ -377,9 +361,9 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
         CATE_test_hat[k_index,] <- c(forest_W$do_predict(t(W1))-forest_W$do_predict(t(W0))) + CATE_test_hat_int
       }
 
-      Hetero_total_blk <- rep(NA, n_blocks)
-      Hetero_wo_blk <- matrix(NA, nrow = p, ncol = n_blocks)
-      Hetero_wo_blk_group <- matrix(NA, nrow = length(Group_ind), ncol = n_blocks)
+      Hetero_total_blk <- array(NA, dim=c(n_blocks,v))
+      Hetero_wo_blk <- array(NA, dim=c(p, n_blocks, v))
+      Hetero_wo_blk_group <- array(NA, dim=c(length(Group_ind), n_blocks, v))
       for (block in 1:n_blocks){
         ## First, calculate the total heterogeneity.
         ## E(Y(W)-Y(W0)|X) = g(W)-g(W0) + h(X,W)-h(X,W0)
@@ -387,32 +371,46 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
         ## Since g and h (also f) are not yet identifiable, we make some adjustments during the calculation.
         N <- sum(block_index==block)
         g_tilde_int1 <- 0
-        g_tilde_int2 <- 0
+        g_tilde_int2 <- rep(0, v)
         for (j in Mod_ind) {
           g_tilde_int1 <- g_tilde_int1 + forest[[j]]$predict(W_sampled[[block]], X_star_sampled[[block]][,j])
-          g_tilde_int2 <- g_tilde_int2 + forest[[j]]$predict(t(W0), X_star[j])
+          for (vv in 1:v) {
+            g_tilde_int2[vv] <- g_tilde_int2[vv] + forest[[j]]$predict(t(W0_VIM[vv,]), X_star[j])
+
+          }
         }
-        g_tilde <-
-          (forest_W$do_predict(W_sampled[[block]]) + g_tilde_int1 ) -
-          (rep(forest_W$do_predict(t(W0)) + g_tilde_int2, N) )
+        g_tilde <- matrix(NA, N , v)
+        for (vv in 1:v){
+          g_tilde[,vv] <-
+            (forest_W$do_predict(W_sampled[[block]]) + g_tilde_int1 ) -
+            (rep(forest_W$do_predict(t(W0_VIM[vv,])) + g_tilde_int2[vv], N) )
+        }
+
         h_tilde <- list()
         for (j in Mod_ind){
-          h_tilde[[j]] <-
-            (forest[[j]]$predict(W_sampled_grid[[block]], X_sampled_grid[[block]][,j]) -
-               rep(forest[[j]]$predict(W_sampled[[block]], X_star_sampled[[block]][,j]), each=N ) ) -
-            (forest[[j]]$predict(W0_grid[[block]], X_sampled_grid[[block]][,j]) -
-               rep(forest[[j]]$predict(W0_sampled[[block]], X_star_sampled[[block]][,j]), each=N) )
+          temp1 <- (forest[[j]]$predict(W_sampled_grid[[block]], X_sampled_grid[[block]][,j]) -
+                      rep(forest[[j]]$predict(W_sampled[[block]], X_star_sampled[[block]][,j]), each=N ) )
+          h_tilde[[j]] <- matrix(NA, N^2, v)
+          for (vv in 1:v){
+            h_tilde[[j]][,vv] <- temp1 -
+              (forest[[j]]$predict(W0_grid[[block]][[vv]], X_sampled_grid[[block]][,j]) -
+                 rep(forest[[j]]$predict(W0_sampled[[block]][[vv]], X_star_sampled[[block]][,j]), each=N) )
+          }
+
         }
 
         ## Take the mean of variance of CATE=(g_tilde + h_tilde).
-        Hetero_vec_int <- 0
-        for (j in Mod_ind){ ## Calculate
+        Hetero_vec_int <- rep(0,v)
+        for (j in Mod_ind){
           Hetero_vec_int <- Hetero_vec_int + h_tilde[[j]]
         }
         Hetero_total_vec <-
           rep(g_tilde, each=N) + Hetero_vec_int # c(tau(X1,W1),tau(X2,W1),...,tau(X1,W2),...,tau(XN,WN))
-        Hetero_total_mat <- matrix(Hetero_total_vec, nrow = N)
-        Hetero_total_blk[block] <- mean(apply(Hetero_total_mat, 2, var))
+        Hetero_total_mat <- array(NA, dim=c(N,N,v))
+        for (vv in 1:v){
+          Hetero_total_mat[,,vv] <- matrix(Hetero_total_vec[,vv], nrow = N)
+        }
+        Hetero_total_blk[block,] <- apply(apply(Hetero_total_mat, c(2,3), var),2,mean)
 
         ## Second, calculate the heterogeneity in E(Y(W)-Y(W0)|X) without X_j.
         ## We are going to calculate E{E(Y(W)-Y(W0)|X)|X_{-j}}
@@ -427,14 +425,21 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
           Hetero_wo_j_vec_int = Hetero_vec_int - h_tilde[[j]]
           Hetero_wo_j_vec <-
             rep(g_tilde, each=N) + Hetero_wo_j_vec_int
-          Hetero_wo_j_mat_base <- matrix(Hetero_wo_j_vec, nrow = N)
+          Hetero_wo_j_mat_base <- array(NA, dim=c(N,N,v))
+          for (vv in 1:v){
+            Hetero_wo_j_mat_base[,,vv] <- matrix(Hetero_wo_j_vec[,vv], nrow = N)
+          }
 
           ## (II) the part that does involve X_j. -> integrated out.
-          h_j_tilde_mat <- matrix(h_tilde[[j]], nrow = N)
-          E_h_j_tilde_mat <- normal_weight[[j]][[block]] %*% h_j_tilde_mat # Integrating out the CATE using the conditional density.
+          h_j_tilde_mat <- array(NA, dim=c(N,N,v))
+          E_h_j_tilde_mat <- array(NA, dim=c(N,N,v))
+          for (vv in 1:v){
+            h_j_tilde_mat[,,vv] <- matrix(h_tilde[[j]][,vv], nrow = N)
+            E_h_j_tilde_mat[,,vv] <- normal_weight[[j]][[block]] %*% h_j_tilde_mat[,,vv] # Integrating out the CATE using the conditional density.
+          }
 
           Hetero_wo_j_mat_ind <- Hetero_wo_j_mat_base + E_h_j_tilde_mat # n by n matrix
-          Hetero_wo_blk[j,block] <- mean(apply(Hetero_wo_j_mat_ind, 2, var)) # Take the variance for each W value and then take the mean of n variances.
+          Hetero_wo_blk[j,block,] <- apply(apply(Hetero_wo_j_mat_ind, c(2,3), var),2,mean) # Take the variance for each W value and then take the mean of n variances.
         }
         if (!is.null(Group_ind)){
           for (gg in 1:length(Group_ind)){
@@ -451,27 +456,34 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
             Hetero_wo_j_vec_int_group = Hetero_vec_int - h_tilde_group
             Hetero_wo_j_vec_group <-
               rep(g_tilde, each=N) + Hetero_wo_j_vec_int_group
-            Hetero_wo_j_mat_base_group <- matrix(Hetero_wo_j_vec_group, nrow = N)
+            Hetero_wo_j_mat_base_group <- array(NA, dim=c(N,N,v))
+            for (vv in 1:v){
+              Hetero_wo_j_mat_base_group[,,vv] <- matrix(Hetero_wo_j_vec_group[,vv], nrow = N)
+            }
 
             ## (II) the part that does involve X_j. -> integrated out.
-            h_j_tilde_mat_group <- matrix(h_tilde_group, nrow = N)
-            E_h_j_tilde_mat_group <- normal_weight_group[[gg]][[block]] %*% h_j_tilde_mat_group # Integrating out the CATE using the conditional density.
+            h_j_tilde_mat_group <- array(NA, dim=c(N,N,v))
+            E_h_j_tilde_mat_group <- array(NA, dim=c(N,N,v))
+            for (vv in 1:v){
+              h_j_tilde_mat_group[,,vv] <- matrix(h_tilde_group[,vv], nrow = N)
+              E_h_j_tilde_mat_group[,,vv] <- normal_weight_group[[gg]][[block]] %*% h_j_tilde_mat_group[,,vv] # Integrating out the CATE using the conditional density.
+            }
 
             Hetero_wo_j_mat_ind_group <- Hetero_wo_j_mat_base_group + E_h_j_tilde_mat_group # n by n matrix
-            Hetero_wo_blk_group[gg,block] <- mean(apply(Hetero_wo_j_mat_ind_group, 2, var)) # Take the variance for each W value and then take the mean of n variances.
+            Hetero_wo_blk_group[gg,block,] <- apply(apply(Hetero_wo_j_mat_ind_group, c(2,3), var),2,mean) # Take the variance for each W value and then take the mean of n variances.
           }
         }
       }
-      Hetero_total[k_index] <- mean(Hetero_total_blk) # Take the mean of the total heterogeneity.
+      Hetero_total[k_index,] <- apply(Hetero_total_blk,2,mean) # Take the mean of the total heterogeneity.
       if (!is.null(Group_ind)){
         for (gg in 1:length(Group_ind)){
-          Hetero_wo_group[[gg]][k_index] <- mean(Hetero_wo_blk_group[gg,]) # Take the mean of the heterogeneity w.o X_j.
-          psi_hat_group[[gg]][k_index] <- mean(1-Hetero_wo_blk_group[gg,]/Hetero_total_blk) # Take the ratio.
+          Hetero_wo_group[[gg]][k_index,] <- apply(Hetero_wo_blk_group[gg,,],2,mean) # Take the mean of the heterogeneity w.o X_j.
+          psi_hat_group[[gg]][k_index,] <- apply(1-Hetero_wo_blk_group[gg,,]/Hetero_total_blk, 2, mean) # Take the ratio.
         }
       }
       for (j in Mod_ind){
-        Hetero_wo[[j]][k_index] <- mean(Hetero_wo_blk[j,]) # Take the mean of the heterogeneity w.o X_j.
-        psi_hat[[j]][k_index] <- mean(1-Hetero_wo_blk[j,]/Hetero_total_blk) # Take the ratio.
+        Hetero_wo[[j]][k_index,] <- apply(Hetero_wo_blk[j,,], 2, mean) # Take the mean of the heterogeneity w.o X_j.
+        psi_hat[[j]][k_index,] <- apply(1-Hetero_wo_blk[j,,]/Hetero_total_blk, 2, mean) # Take the ratio.
       }
     }
 
@@ -508,13 +520,8 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
   print("MCMC scan done")
 
   ## Burning and stepping
-  # mu_hat_c <- mu_hat_c[save_index,] * sd_Y
-  # mu_hat_X <- mu_hat_X[save_index,] * sd_Y
-  # mu_hat_W <- mu_hat_W[save_index,] * sd_Y
   X_quantiles <- list()
   for (j in Mod_ind){
-    # mu_hat_intact[[j]] <- mu_hat_intact[[j]][save_index,] * sd_Y
-
     X_quantiles[[j]] <- quantile(X[,j], seq(0,1,0.01), type=1, na.rm = TRUE)
     Index_quantile <- match(X_quantiles[[j]], X[,j])
     CATE_h_hat[[j]] <- (CATE_h_hat[[j]][, Index_quantile])* sd_Y
@@ -525,16 +532,7 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
   E_Y_W1 <- E_Y_W1 * sd_Y
   if (is.null(Xtest)==FALSE){CATE_test_hat <- CATE_test_hat * sd_Y }
 
-  print("Scaling back done")
-
-  ## Calculate the predicted outcomes
-  # sum_mu_hat_intact <- 0
-  # for (j in Mod_ind){
-  #   sum_mu_hat_intact <- sum_mu_hat_intact + mu_hat_intact[[j]]
-  # }
-
   ## Calculate the posterior means
-  # CATE_hat.mean <- apply(CATE_hat,2,mean)
   ATE_hat <- ATE_upper_hat <- rep(NA, nsave)
   for (kk in 1:nsave){
     BB_alpha <- rep(1, num_obs)
@@ -544,33 +542,6 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
     BB_weights_upper <- rdirichlet(1,BB_alpha_upper)
     ATE_upper_hat[kk] <- BB_weights_upper %*% CATE_hat[kk,upper_half]
   }
-  print("ATE done")
-  if (is.null(Xtest)==FALSE){CATE_test_hat.mean <- apply(CATE_test_hat,2,mean)
-  }else{CATE_test_hat.mean <- NA}
-  Hetero_total.mean <- mean(Hetero_total)
-  # Y.hat.mean <- apply(Y.hat,2,mean)
-  # mu.hat.c.mean <- apply(mu_hat_c,2,mean)
-  # mu.hat.X.mean <- apply(mu_hat_X,2,mean)
-  # mu.hat.W.mean <- apply(mu_hat_W,2,mean)
-  # mu.hat.intact.mean <- list()
-  # Hetero_wo.mean <- Hetero_wo.mean_group <- list()
-  # psi_hat.mean <- psi_hat.mean_group <- list()
-  # CATE_h_hat.mean <- list()
-  # for (j in Mod_ind){
-  #   # mu.hat.intact.mean[[j]] <- apply(mu_hat_intact[[j]],2,mean,na.rm=T)
-  #   Hetero_wo.mean[[j]] <- mean(Hetero_wo[[j]],na.rm=T)
-  #   psi_hat.mean[[j]] <- mean(psi_hat[[j]],na.rm=T)
-  #   CATE_h_hat.mean[[j]] <- apply(CATE_h_hat[[j]],2,mean,na.rm=T)
-  # }
-  #
-  # if(!is.null(Group_ind)){
-  #   for (gg in 1:length(Group_ind)){
-  #     Hetero_wo.mean_group[[gg]] <- mean(Hetero_wo_group[[gg]],na.rm=T)
-  #     psi_hat.mean_group[[gg]] <- mean(psi_hat_group[[gg]],na.rm=T)
-  #   }
-  # }
-
-  print("Taking means done")
 
   end.time.MCMC <- Sys.time()
   (running.time.MCMC <- end.time.MCMC-start.time.MCMC)
@@ -578,19 +549,13 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
 
   return(list(
     CATE_h_hat = CATE_h_hat,
-    # CATE_h_hat.mean = CATE_h_hat.mean,
-    # CATE_hat.mean = CATE_hat.mean,
-    #    CATE_test_hat.mean = CATE_test_hat.mean,
-    # Hetero_total.mean = Hetero_total.mean,
-    # Hetero_wo.mean = Hetero_wo.mean,
-    # psi_hat.mean = psi_hat.mean,
-    # psi_hat.mean_group = psi_hat.mean_group,
     ATE_hat = ATE_hat,
     ATE_upper_hat = ATE_upper_hat,
-    #    CATE_hat = CATE_hat,
-    #    CATE_test_hat = CATE_test_hat,
+    E_Y_W0 = E_Y_W0,
+    E_Y_W1 = E_Y_W1,
+   CATE_hat = CATE_hat,
+   CATE_test_hat = CATE_test_hat,
     Hetero_total = Hetero_total,
-    #    Hetero_wo = Hetero_wo,
     psi_hat = psi_hat,
     psi_hat_group = psi_hat_group,
     sd_Y=sd_Y,
@@ -600,10 +565,9 @@ SepBART_blk <- function(Y,X,W, Xtest = NULL, W1 = NULL, W0 = NULL, W0_quantile =
     X_names = X_names,
     W_names = W_names,
     Mod_names = Mod_names,
-    # E_Y_W0 = E_Y_W0,
-    # E_Y_W1 = E_Y_W1
     W1 = W1,
     W0 = W0,
+    W0_VIM = W0_VIM,
     W1_window = W1_window,
     W0_window = W0_window,
     ps1 = ps1,

@@ -1,14 +1,14 @@
 Package: SepBART
 Type: Package
-Title: What the Package Does (Title Case)
+Title: SepBART R Package
 Version: 0.1.0
 Author: Heejun Shin
 Maintainer: Heejun Shin <heejunshin@hsph.harvard.edu>
 Description: A package for analyzing treatment effect heteogeneity of multivariate continuous exposures.
 Imports:
-     SoftBart
+     SoftBART, ModBART, LaplacesDemon, Rcpp, mvtnorm
 Remote:
     github::hshin111/SoftBART@MFM
-License: What license is it under?
+    github::hshin111/ModBART
+License: GPL (>= 2)
 Encoding: UTF-8
-LazyData: true
